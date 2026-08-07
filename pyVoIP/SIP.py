@@ -991,9 +991,14 @@ class SIPClient:
         return self.gen_call_id()
 
     def gen_call_id(self) -> str:
-        hash = hashlib.sha256(str(self.callID.next()).encode("utf8"))
-        hhash = hash.hexdigest()
-        return f"{hhash[0:32]}@{self.myIP}:{self.myPort}"
+        # UUID4 rather than a hash of self.callID's counter: the counter
+        # restarts at the same value every time a new SIPClient is
+        # constructed, so short-lived processes (register, place one call,
+        # exit) generated an *identical* Call-ID on every run. A server
+        # that still has a stale dialog cached under that Call-ID from a
+        # previous run then treats the new INVITE as a malformed
+        # retransmission instead of a fresh call.
+        return f"{uuid.uuid4().hex}@{self.myIP}:{self.myPort}"
 
     def lastCallID(self) -> str:
         warnings.warn(
@@ -1560,10 +1565,13 @@ class SIPClient:
         ackMessage = f"ACK {t} SIP/2.0\r\n"
         ackMessage += self._gen_response_via_header(request)
         ackMessage += "Max-Forwards: 70\r\n"
-        ackMessage += (
-            f"To: {request.headers['To']['raw']};tag="
-            + f"{self.gen_tag()}\r\n"
-        )
+        # Per RFC 3261 17.1.1.3, the ACK for a 2xx response MUST echo the
+        # exact tag the remote UAS assigned in that response's To header,
+        # not a freshly generated one -- otherwise the remote can't match
+        # the ACK to the dialog it created, keeps retransmitting the 2xx
+        # (Timer G) until Timer H expires, and tears the call down.
+        to_tag = request.headers["To"]["tag"] or self.gen_tag()
+        ackMessage += f"To: {request.headers['To']['raw']};tag={to_tag}\r\n"
         ackMessage += f"From: {request.headers['From']['raw']};tag={tag}\r\n"
         ackMessage += f"Call-ID: {request.headers['Call-ID']}\r\n"
         ackMessage += f"CSeq: {request.headers['CSeq']['check']} ACK\r\n"

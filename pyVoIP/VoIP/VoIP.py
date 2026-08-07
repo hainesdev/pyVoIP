@@ -621,6 +621,7 @@ class VoIPPhone:
                 "TODO: Add 481 here as server is probably waiting for "
                 + "an ACK"
             )
+            return
         self.calls[call_id].not_found(request)
         debug("Terminating Call")
         ack = self.sip.gen_ack(request)
@@ -635,6 +636,7 @@ class VoIPPhone:
                 "TODO: Add 481 here as server is probably waiting for "
                 + "an ACK"
             )
+            return
         self.calls[call_id].unavailable(request)
         debug("Terminating Call")
         ack = self.sip.gen_ack(request)
