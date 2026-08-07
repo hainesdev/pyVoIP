@@ -1560,10 +1560,11 @@ class SIPClient:
         ackMessage = f"ACK {t} SIP/2.0\r\n"
         ackMessage += self._gen_response_via_header(request)
         ackMessage += "Max-Forwards: 70\r\n"
-        ackMessage += (
-            f"To: {request.headers['To']['raw']};tag="
-            + f"{self.gen_tag()}\r\n"
-        )
+        # RFC 3261 17.1.1.3: the ACK for a 2xx response MUST echo the tag
+        # the remote UAS assigned in that response's To header, not a
+        # freshly generated one. Fixes #312.
+        to_tag = request.headers["To"]["tag"] or self.gen_tag()
+        ackMessage += f"To: {request.headers['To']['raw']};tag={to_tag}\r\n"
         ackMessage += f"From: {request.headers['From']['raw']};tag={tag}\r\n"
         ackMessage += f"Call-ID: {request.headers['Call-ID']}\r\n"
         ackMessage += f"CSeq: {request.headers['CSeq']['check']} ACK\r\n"
