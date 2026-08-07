@@ -991,9 +991,11 @@ class SIPClient:
         return self.gen_call_id()
 
     def gen_call_id(self) -> str:
-        hash = hashlib.sha256(str(self.callID.next()).encode("utf8"))
-        hhash = hash.hexdigest()
-        return f"{hhash[0:32]}@{self.myIP}:{self.myPort}"
+        # UUID4 instead of hashing self.callID's counter: the counter
+        # restarts at the same value every time a new SIPClient is
+        # constructed, so short-lived processes generated an identical
+        # Call-ID on every run. Fixes #316.
+        return f"{uuid.uuid4().hex}@{self.myIP}:{self.myPort}"
 
     def lastCallID(self) -> str:
         warnings.warn(
