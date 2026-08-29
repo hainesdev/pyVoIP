@@ -940,6 +940,21 @@ class SIPClient:
                 self.out.sendto(
                     response.encode("utf8"), (self.server, self.port)
                 )
+        elif message.method == "OPTIONS":
+            response = self.gen_ok(message)
+            try:
+                (_sender_adress, _sender_port) = message.headers["Via"][0][
+                    "address"
+                ]
+                self.out.sendto(
+                    response.encode("utf8"),
+                    (_sender_adress, int(_sender_port)),
+                )
+            except Exception:
+                debug("OPTIONS Answer failed falling back to server as target")
+                self.out.sendto(
+                    response.encode("utf8"), (self.server, self.port)
+                )
         elif message.method == "ACK":
             return
         elif message.method == "CANCEL":
