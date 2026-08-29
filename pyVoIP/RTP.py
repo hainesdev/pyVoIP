@@ -165,6 +165,7 @@ class RTPPacketManager:
         self.bufferLock = threading.Lock()
         self.log = {}
         self.rebuilding = False
+        self.last_offset: Optional[int] = None  # timestamp of the most recent write
 
     def read(self, length: int = 160) -> bytes:
         # This acts functionally as a lock while the buffer is being rebuilt.
@@ -195,6 +196,20 @@ class RTPPacketManager:
         self.bufferLock.acquire()
         self.log[offset] = data
         bufferloc = self.buffer.tell()
+        prev = self.last_offset
+        self.last_offset = offset
+        if prev is not None and abs(offset - prev) >= 100000:
+            """
+            The RTP timestamp jumped by far more than jitter/reordering could
+            explain -- the remote swapped its media source mid-call (e.g.
+            dialplan playback -> a bridge) and the new source picked a fresh
+            random timestamp base.  Seeking to `offset - self.offset` below
+            would land gigabytes into the buffer, so rebase on this packet.
+            """
+            self.offset = offset
+            self.bufferLock.release()
+            self.rebuild(True, offset, data)
+            return
         if offset < self.offset:
             """
             If the new timestamp is over 100,000 bytes before the
@@ -334,6 +349,61 @@ class RTPClient:
         self.outTimestamp = random.randint(1, 10000)
         self.outSSRC = random.randint(1000, 65530)
 
+        # Outbound RFC 2833 (telephone-event) DTMF.
+        self.dtmf_lock = threading.Lock()
+        self.dtmf_queue: list = []          # (event, end, duration, marker, volume)
+        self.dtmf_ts: Optional[int] = None
+        self.event_pt = next(
+            (pt for pt, t in self.assoc.items() if t == PayloadType.EVENT), None
+        )
+
+    _DTMF_EVENTS = {**{str(i): i for i in range(10)}, "*": 10, "#": 11,
+                    "A": 12, "B": 13, "C": 14, "D": 15, "a": 12, "b": 13,
+                    "c": 14, "d": 15}
+
+    def send_dtmf(
+        self, digit: str, duration_ms: int = 200, volume: int = 10
+    ) -> None:
+        """Queue one RFC 2833 DTMF digit for transmission on the RTP stream.
+
+        No-op if the far end did not negotiate telephone-event.
+        """
+        event = self._DTMF_EVENTS.get(digit)
+        if event is None or self.event_pt is None:
+            return
+        step = 160  # 20 ms @ 8 kHz, one packet
+        packets = max(1, duration_ms // 20)
+        total = step * packets
+        burst = [(event, False, min(step * (i + 1), total), i == 0, volume)
+                 for i in range(packets)]
+        burst += [(event, True, total, False, volume)] * 3  # 3 redundant ends
+        with self.dtmf_lock:
+            self.dtmf_queue.extend(burst)
+
+    def _send_dtmf_packet(self, spec: tuple) -> None:
+        event, end, duration, marker, volume = spec
+        if self.dtmf_ts is None:
+            self.dtmf_ts = self.outTimestamp
+        b1 = (0x80 | self.event_pt) if marker else self.event_pt
+        payload = bytes([
+            event & 0xFF,
+            ((0x80 if end else 0) | (volume & 0x3F)) & 0xFF,
+            (duration >> 8) & 0xFF,
+            duration & 0xFF,
+        ])
+        packet = (
+            bytes([0x80, b1])
+            + (self.outSequence & 0xFFFF).to_bytes(2, "big")
+            + (self.dtmf_ts & 0xFFFFFFFF).to_bytes(4, "big")
+            + self.outSSRC.to_bytes(4, "big")
+            + payload
+        )
+        try:
+            self.sout.sendto(packet, (self.outIP, self.outPort))
+        except OSError:
+            pass
+        self.outSequence += 1
+
     def start(self) -> None:
         self.sin = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         # Some systems just reply to the port they receive from instead of
@@ -382,6 +452,24 @@ class RTPClient:
     def trans(self) -> None:
         while self.NSD:
             last_sent = time.monotonic_ns()
+
+            # An in-flight RFC 2833 DTMF burst pre-empts the audio stream, one
+            # 20 ms event packet per iteration, so tones keep RTP timing.
+            with self.dtmf_lock:
+                spec = self.dtmf_queue.pop(0) if self.dtmf_queue else None
+                drained = spec is not None and not self.dtmf_queue
+            if spec is not None:
+                self._send_dtmf_packet(spec)
+                if drained and self.dtmf_ts is not None:
+                    self.outTimestamp = self.dtmf_ts + spec[2]
+                    self.dtmf_ts = None
+                delay = (1 / self.preference.rate) * 160
+                sleep_time = max(
+                    0, delay - ((time.monotonic_ns() - last_sent) / 1000000000)
+                )
+                time.sleep(sleep_time / self.trans_delay_reduction)
+                continue
+
             payload = self.pmout.read()
             payload = self.encode_packet(payload)
             packet = b"\x80"  # RFC 1889 V2 No Padding Extension or CC.

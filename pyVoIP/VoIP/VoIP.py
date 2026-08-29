@@ -255,6 +255,12 @@ class VoIPCall:
             packet = self.dtmf.read(length)
             return packet
 
+    def send_dtmf(self, digits: str, duration_ms: int = 200) -> None:
+        """Transmit RFC 2833 DTMF for each character in ``digits``."""
+        for client in self.RTPClients:
+            for digit in digits:
+                client.send_dtmf(digit, duration_ms=duration_ms)
+
     def genMs(self) -> Dict[int, Dict[int, RTP.PayloadType]]:
         warnings.warn(
             "genMs is deprecated due to PEP8 compliance. "
