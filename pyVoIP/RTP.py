@@ -165,6 +165,7 @@ class RTPPacketManager:
         self.bufferLock = threading.Lock()
         self.log = {}
         self.rebuilding = False
+        self.last_offset: Optional[int] = None  # timestamp of the most recent write
 
     def read(self, length: int = 160) -> bytes:
         # This acts functionally as a lock while the buffer is being rebuilt.
@@ -195,6 +196,20 @@ class RTPPacketManager:
         self.bufferLock.acquire()
         self.log[offset] = data
         bufferloc = self.buffer.tell()
+        prev = self.last_offset
+        self.last_offset = offset
+        if prev is not None and abs(offset - prev) >= 100000:
+            """
+            The RTP timestamp jumped by far more than jitter/reordering could
+            explain -- the remote swapped its media source mid-call (e.g.
+            dialplan playback -> a bridge) and the new source picked a fresh
+            random timestamp base.  Seeking to `offset - self.offset` below
+            would land gigabytes into the buffer, so rebase on this packet.
+            """
+            self.offset = offset
+            self.bufferLock.release()
+            self.rebuild(True, offset, data)
+            return
         if offset < self.offset:
             """
             If the new timestamp is over 100,000 bytes before the
@@ -208,18 +223,6 @@ class RTPPacketManager:
             timestamp comes in, this will stop overwritting.
             """
             self.rebuild(reset, offset, data)
-            return
-        if offset - self.offset >= 100000:
-            """
-            A large *forward* jump in the RTP timestamp -- e.g. the remote
-            swapped the media source mid-call (dialplan playback -> bridge)
-            and the new source picked a fresh random timestamp base.  Without
-            this, the seek below lands gigabytes into the buffer and playback
-            never recovers.  Treat it as a new reference point.
-            """
-            self.offset = offset
-            self.bufferLock.release()
-            self.rebuild(True, offset, data)
             return
         offset = offset - self.offset
         self.buffer.seek(offset, 0)
