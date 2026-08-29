@@ -209,6 +209,18 @@ class RTPPacketManager:
             """
             self.rebuild(reset, offset, data)
             return
+        if offset - self.offset >= 100000:
+            """
+            A large *forward* jump in the RTP timestamp -- e.g. the remote
+            swapped the media source mid-call (dialplan playback -> bridge)
+            and the new source picked a fresh random timestamp base.  Without
+            this, the seek below lands gigabytes into the buffer and playback
+            never recovers.  Treat it as a new reference point.
+            """
+            self.offset = offset
+            self.bufferLock.release()
+            self.rebuild(True, offset, data)
+            return
         offset = offset - self.offset
         self.buffer.seek(offset, 0)
         self.buffer.write(data)
